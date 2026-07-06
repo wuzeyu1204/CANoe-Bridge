@@ -20,7 +20,7 @@ from typing import Any
 
 from zlg_canoe_bridge.__main__ import build_adapters, channel_configs, load_config
 from zlg_canoe_bridge.bridge import BridgeCore
-from zlg_canoe_bridge.canoe_control import close_canoe, find_canoe_exe, start_canoe
+from zlg_canoe_bridge.canoe_control import close_canoe, find_canoe_exe, is_canoe_running, start_canoe
 from zlg_canoe_bridge.license import current_license, generate_license, machine_id, register_license
 
 
@@ -50,7 +50,19 @@ class QueueLogHandler(logging.Handler):
         try:
             created = datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S")
             message = _friendly_error(record.getMessage())
-            self.log_queue.put((record.levelname, f"[{created}] [{record.levelname}] {message}"))
+            line = f"[{created}] [{record.levelname}] {message}"
+            try:
+                self.log_queue.put_nowait((record.levelname, line))
+            except queue.Full:
+                if record.levelno >= logging.WARNING:
+                    try:
+                        self.log_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self.log_queue.put_nowait((record.levelname, line))
+                    except queue.Full:
+                        pass
         except Exception:
             self.handleError(record)
 
@@ -154,13 +166,15 @@ class BridgeGui(tk.Tk):
         self.minsize(1040, 680)
         self._configure_style()
 
-        self.log_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+        self.log_queue: "queue.Queue[tuple[str, str]]" = queue.Queue(maxsize=2000)
+        self.control_queue: "queue.Queue[tuple[str, tuple[Any, ...]]]" = queue.Queue()
         self.logger = self._create_logger("logs", "INFO")
         self.runtime: BridgeRuntime | None = None
         self.canoe_process: subprocess.Popen | None = None
         self.settings_window: tk.Toplevel | None = None
         self.pending_canoe_autostart = False
         self.user_paused = False
+        self.close_after_stop = False
         self.cfg: dict[str, Any] = {}
         self.config_path = tk.StringVar(value=str(Path(config_path).resolve()))
 
@@ -213,6 +227,7 @@ class BridgeGui(tk.Tk):
         self._refresh_channel_table()
         self.after(100, self._poll_runtime)
         self.after(100, self._poll_logs)
+        self.after(100, self._poll_control_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _configure_style(self) -> None:
@@ -387,7 +402,7 @@ class BridgeGui(tk.Tk):
 
         self._row(basic, 0, "桥接模式", ttk.Combobox(basic, textvariable=self.mode, values=("原生桥接", "调试模式"), state="readonly"))
         self._row(basic, 1, "日志等级", ttk.Combobox(basic, textvariable=self.log_level, values=("DEBUG", "INFO", "WARNING", "ERROR"), state="readonly"))
-        ttk.Checkbutton(basic, text="启动桥接后自动打开 CANoe", variable=self.canoe_auto_start).grid(row=2, column=1, sticky=tk.W, padx=8, pady=5)
+        ttk.Checkbutton(basic, text="启动桥接前自动打开 CANoe", variable=self.canoe_auto_start).grid(row=2, column=1, sticky=tk.W, padx=8, pady=5)
         ttk.Checkbutton(basic, text="启动时自动检测 ZLG 设备", variable=self.auto_detect_zlg).grid(row=3, column=1, sticky=tk.W, padx=8, pady=5)
         ttk.Checkbutton(basic, text="启用回环抑制", variable=self.echo_suppression).grid(row=4, column=1, sticky=tk.W, padx=8, pady=5)
         self._row(basic, 5, "回环抑制时间窗口 ms", ttk.Entry(basic, textvariable=self.echo_window))
@@ -637,69 +652,140 @@ class BridgeGui(tk.Tk):
     def _start_bridge(self) -> None:
         try:
             self.cfg = self._cfg_from_form()
-            errors, warnings = self._preflight(self.cfg)
-            if warnings:
-                self._log("WARNING", "\n".join(warnings))
-            if errors:
-                message = "启动前自检未通过：\n\n" + "\n\n".join(errors)
-                self._log("ERROR", message)
-                messagebox.showerror(APP_TITLE, message)
+            if not is_canoe_running():
+                if not self.canoe_auto_start.get():
+                    self._log("ERROR", "CANoe 未启动。请先点击【启动 CANoe】，确认 CANoe 打开后再启动桥接。")
+                    messagebox.showerror(APP_TITLE, "CANoe 未启动。\n请先点击【启动 CANoe】，确认 CANoe 打开后再启动桥接。")
+                    return
+                self._log("INFO", "启动桥接前先启动 CANoe。CANoe 启动完成后将自动开启桥接。")
+                if not self._start_canoe(show_errors=True):
+                    self._log("ERROR", "CANoe 未启动，已取消桥接启动，ZLG 硬件不会被占用。")
+                    return
+                self.bridge_state.set("等待 CANoe")
+                self._update_button_states("starting")
+                self.after(8000, self._start_bridge_after_canoe)
                 return
-
-            self.logger = self._create_logger(self.cfg.get("logDir", "logs"), self.cfg.get("logLevel", "INFO"), timestamped=True)
-            self.runtime = BridgeRuntime(copy.deepcopy(self.cfg), self.logger)
-            self.user_paused = False
-            self.runtime.start()
-            self.bridge_state.set("启动中")
-            self.bus_state.set("未知")
-            self._update_button_states("starting")
-            self._log("INFO", "正在启动桥接，请稍候。")
-            self.pending_canoe_autostart = bool(self.canoe_auto_start.get())
+            self._start_bridge_now()
         except Exception as exc:
             messagebox.showerror(APP_TITLE, f"启动桥接失败：\n{_friendly_error(str(exc))}")
 
+    def _start_bridge_after_canoe(self) -> None:
+        if not is_canoe_running():
+            self.bridge_state.set("未启动")
+            self._update_button_states("stopped")
+            self._log("ERROR", "CANoe 进程未检测到，桥接未启动。请确认 CANoe 已正常打开后重试。")
+            return
+        self._start_bridge_now()
+
+    def _start_bridge_now(self) -> None:
+        errors, warnings = self._preflight(self.cfg)
+        if warnings:
+            self._log("WARNING", "\n".join(warnings))
+        if errors:
+            message = "启动前自检未通过：\n\n" + "\n\n".join(errors)
+            self._log("ERROR", message)
+            messagebox.showerror(APP_TITLE, message)
+            self.bridge_state.set("未启动")
+            self._update_button_states("stopped")
+            return
+
+        self.logger = self._create_logger(self.cfg.get("logDir", "logs"), self.cfg.get("logLevel", "INFO"), timestamped=True)
+        self.runtime = BridgeRuntime(copy.deepcopy(self.cfg), self.logger)
+        self.user_paused = False
+        self.pending_canoe_autostart = False
+        self.runtime.start()
+        self.bridge_state.set("启动中")
+        self.bus_state.set("未知")
+        self._update_button_states("starting")
+        self._log("INFO", "正在启动桥接，请稍候。")
+
     def _pause_bridge(self) -> None:
-        if self.runtime:
-            self.user_paused = True
-            self.runtime.stop()
-            self.bridge_state.set("停止中")
-            self._update_button_states("stopping")
-            self._log("INFO", "已请求暂停桥接，正在释放 Vector/ZLG 通道。")
+        self._request_bridge_stop(paused=True, close_canoe_after=False)
 
     def _stop_bridge(self) -> None:
-        if self.runtime:
-            self.user_paused = False
-            self.runtime.stop()
-            if self.runtime.thread:
-                self.runtime.thread.join(timeout=3.0)
-            self.runtime = None
-        self.pending_canoe_autostart = False
-        self.bridge_state.set("未启动")
-        self.bus_state.set("未知")
-        self._update_button_states("stopped")
-        self._refresh_channel_table(status_override="未启动")
-        self._log("INFO", "桥接已停止，后台不会继续占用硬件通道。")
+        self._request_bridge_stop(paused=False, close_canoe_after=False)
 
-    def _start_canoe(self) -> None:
+    def _request_bridge_stop(self, paused: bool, close_canoe_after: bool) -> None:
+        runtime = self.runtime
+        self.user_paused = paused
+        self.pending_canoe_autostart = False
+        if runtime:
+            runtime.stop()
+        self.bridge_state.set("停止中")
+        self._update_button_states("stopping")
+        self._log("INFO", "已请求停止桥接，正在后台释放 Vector/ZLG 通道。")
+
+        def worker() -> None:
+            stop_ok = True
+            if runtime and runtime.thread:
+                runtime.thread.join(timeout=6.0)
+                stop_ok = not runtime.thread.is_alive()
+            close_count: int | None = None
+            close_error = ""
+            if close_canoe_after:
+                try:
+                    close_count = close_canoe()
+                    if is_canoe_running():
+                        close_error = "CANoe 仍在运行，可能正在等待保存确认或关闭较慢。桥接已停止并释放硬件，请在 CANoe 中确认关闭提示。"
+                except Exception as exc:
+                    close_error = _friendly_error(str(exc))
+            self.control_queue.put(("bridge_stop_finished", (runtime, paused, stop_ok, close_canoe_after, close_count, close_error)))
+
+        threading.Thread(target=worker, name="BridgeStopWorker", daemon=True).start()
+
+    def _finish_bridge_stop(
+        self,
+        runtime: BridgeRuntime | None,
+        paused: bool,
+        stop_ok: bool,
+        close_canoe_after: bool,
+        close_count: int | None,
+        close_error: str,
+    ) -> None:
+        if runtime is self.runtime and stop_ok:
+            self.runtime = None
+        if stop_ok:
+            self.bridge_state.set("已暂停" if paused else "未启动")
+            self.bus_state.set("未知")
+            self._update_button_states("paused" if paused else "stopped")
+            self._refresh_channel_table(status_override="已暂停" if paused else "未启动")
+            self._log("INFO", "桥接已停止，后台不会继续占用硬件通道。")
+        else:
+            self.bridge_state.set("停止中")
+            self._update_button_states("stopping")
+            self._log("WARNING", "桥接停止仍在等待硬件 API 返回。界面保持可响应，请稍后再尝试关闭。")
+        if close_canoe_after:
+            if close_error:
+                messagebox.showerror(APP_TITLE, f"关闭 CANoe 失败：\n{close_error}")
+            else:
+                self.canoe_state.set("未连接")
+                self._log("INFO", f"已请求关闭 CANoe，发送关闭请求窗口数：{close_count}")
+        if self.close_after_stop:
+            self.close_after_stop = False
+            self.destroy()
+
+    def _start_canoe(self, show_errors: bool = True) -> bool:
         try:
             self.cfg = self._cfg_from_form()
+            if is_canoe_running():
+                self.canoe_state.set("已启动")
+                self._log("INFO", "检测到 CANoe 已在运行。")
+                return True
             exe = Path(self.cfg.get("canoe", {}).get("exePath", ""))
             if not exe.is_file():
                 raise FileNotFoundError(f"CANoe 程序路径不存在：{exe}")
             self.canoe_process = start_canoe(self.cfg)
             self.canoe_state.set("已启动")
             self._log("INFO", f"已请求启动 CANoe：pid={self.canoe_process.pid}")
+            return True
         except Exception as exc:
             self.canoe_state.set("未连接")
-            messagebox.showerror(APP_TITLE, f"启动 CANoe 失败：\n{_friendly_error(str(exc))}")
+            if show_errors:
+                messagebox.showerror(APP_TITLE, f"启动 CANoe 失败：\n{_friendly_error(str(exc))}")
+            return False
 
     def _close_canoe(self) -> None:
-        try:
-            count = close_canoe()
-            self.canoe_state.set("未连接")
-            self._log("INFO", f"已请求关闭 CANoe，发送关闭请求窗口数：{count}")
-        except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"关闭 CANoe 失败：\n{_friendly_error(str(exc))}")
+        self._request_bridge_stop(paused=False, close_canoe_after=True)
 
     def _detect_device(self, show_popup: bool = False) -> bool:
         try:
@@ -892,19 +978,45 @@ class BridgeGui(tk.Tk):
         self.after(200, self._poll_runtime)
 
     def _poll_logs(self) -> None:
-        while True:
+        processed = 0
+        while processed < 80:
             try:
                 level, line = self.log_queue.get_nowait()
             except queue.Empty:
                 break
             self._append_log(line, level)
+            processed += 1
+        if processed:
+            self._trim_log_text()
+            self.log_text.configure(state=tk.NORMAL)
+            self.log_text.see(tk.END)
+            self.log_text.configure(state=tk.DISABLED)
         self.after(100, self._poll_logs)
+
+    def _poll_control_queue(self) -> None:
+        while True:
+            try:
+                event, payload = self.control_queue.get_nowait()
+            except queue.Empty:
+                break
+            if event == "bridge_stop_finished":
+                self._finish_bridge_stop(*payload)
+        self.after(100, self._poll_control_queue)
 
     def _append_log(self, line: str, level: str = "INFO") -> None:
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.insert(tk.END, line + "\n", level if level in {"ERROR", "WARNING", "INFO", "DEBUG"} else "INFO")
-        self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
+
+    def _trim_log_text(self, max_lines: int = 1500) -> None:
+        self.log_text.configure(state=tk.NORMAL)
+        try:
+            end_line = int(float(self.log_text.index("end-1c")))
+            if end_line > max_lines:
+                delete_to = end_line - max_lines
+                self.log_text.delete("1.0", f"{delete_to}.0")
+        finally:
+            self.log_text.configure(state=tk.DISABLED)
 
     def _log(self, level: str, message: str) -> None:
         level = level.upper()
@@ -978,9 +1090,9 @@ class BridgeGui(tk.Tk):
 
     def _on_close(self) -> None:
         if self.runtime and self.runtime.snapshot()["status"] in ("running", "starting", "stopping"):
-            self.runtime.stop()
-            if self.runtime.thread:
-                self.runtime.thread.join(timeout=3.0)
+            self.close_after_stop = True
+            self._request_bridge_stop(paused=False, close_canoe_after=False)
+            return
         self.destroy()
 
     def _on_zlg_model_changed(self) -> None:

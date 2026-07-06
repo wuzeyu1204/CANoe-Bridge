@@ -112,7 +112,7 @@ class BridgeCore:
                 self.zlg.send(frame)
                 self.v2z_echo.mark_tx(frame)
                 self.count_v2z += 1
-                self.log.info("[%s CANoe -> ZLG] %s", self.name, frame.short())
+                self.log.debug("[%s CANoe -> ZLG] %s", self.name, frame.short())
             except Exception as e:
                 self.log.exception("[%s] Vector->ZLG loop error: %s", self.name, e)
                 time.sleep(0.1)
@@ -131,7 +131,7 @@ class BridgeCore:
                 self.vector.send(frame)
                 self.z2v_echo.mark_tx(frame)
                 self.count_z2v += 1
-                self.log.info("[%s ZLG -> CANoe] %s", self.name, frame.short())
+                self.log.debug("[%s ZLG -> CANoe] %s", self.name, frame.short())
             except Exception as e:
                 self.log.exception("[%s] ZLG->Vector loop error: %s", self.name, e)
                 time.sleep(0.1)

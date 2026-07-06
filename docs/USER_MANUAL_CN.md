@@ -31,11 +31,11 @@ CANoe-ZLG CAN/CANFD 桥接工具用于把 Vector CANoe 的 Vector Virtual CAN / 
 
 操作按钮：
 
-- 启动桥接：执行启动前自检，通过后打开 Vector 虚拟通道和 ZLG 硬件通道。
+- 启动桥接：先确认 CANoe 已启动；如果启用了自动启动 CANoe，会先启动 CANoe，再执行桥接自检并打开 Vector/ZLG 通道。
 - 暂停桥接：停止桥接线程并释放 Vector/ZLG 通道，不在后台继续占用硬件。
 - 停止桥接：停止桥接并恢复到未启动状态。
 - 启动 CANoe：按配置启动 CANoe，可同时打开指定 CANoe 工程。
-- 关闭 CANoe：向 CANoe 主窗口发送关闭请求。
+- 关闭 CANoe：先停止桥接并释放 Vector/ZLG 通道，再向 CANoe 主窗口发送关闭请求。
 - 设备检测：尝试打开并关闭 ZLG 设备，用于确认 DLL、驱动和设备类型配置。
 - 参数设置：打开悬浮参数设置窗口。
 - 保存日志：将当前运行日志保存到 `logs/bridge_YYYYMMDD_HHMMSS.log`。
@@ -61,7 +61,7 @@ config/bridge_config.json
 
 - 桥接模式：原生桥接 / 调试模式
 - 日志等级：DEBUG / INFO / WARNING / ERROR
-- 启动桥接后自动打开 CANoe
+- 启动桥接前自动打开 CANoe
 - 启动时自动检测 ZLG 设备
 - 启用回环抑制
 - 回环抑制时间窗口 ms
@@ -111,15 +111,16 @@ config/bridge_config.json
 
 点击【启动桥接】时会先执行自检：
 
-1. License 是否有效。
-2. 配置文件是否存在。
-3. CANoe 程序路径是否存在。
-4. ZLG DLL 路径是否存在。
-5. ZLG 设备是否可打开。
-6. Vector 应用名称是否为空。
-7. CAN/CANFD 波特率配置是否完整。
-8. Classical CAN 模式下配置了 CANFD 参数时给出提示。
-9. ZCAN_OpenDevice 失败时提示可能被 ZXDoc/ZCANPRO 占用。
+1. CANoe 是否已经启动；未启动且未勾选自动启动 CANoe 时，不会打开桥接。
+2. License 是否有效。
+3. 配置文件是否存在。
+4. CANoe 程序路径是否存在。
+5. ZLG DLL 路径是否存在。
+6. ZLG 设备是否可打开。
+7. Vector 应用名称是否为空。
+8. CAN/CANFD 波特率配置是否完整。
+9. Classical CAN 模式下配置了 CANFD 参数时给出提示。
+10. ZCAN_OpenDevice 失败时提示可能被 ZXDoc/ZCANPRO 占用。
 
 典型 ZLG 打开失败提示：
 
@@ -195,8 +196,9 @@ assets\app_icon.ico
 - 参数设置悬浮窗口和五类配置页签。
 - 启动桥接、暂停桥接、停止桥接。
 - 暂停/停止时释放 Vector/ZLG 通道，不在后台持续桥接。
+- 启动桥接前检查/启动 CANoe；关闭 CANoe 时联动停止桥接。
 - 启动 CANoe、关闭 CANoe。
-- 启动桥接后自动打开 CANoe。
+- 高频报文日志默认不刷屏，避免 GUI 未响应。
 - 启动前自检。
 - ZLG 设备检测。
 - 中文错误提示和处理建议。

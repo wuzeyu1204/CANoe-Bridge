@@ -33,7 +33,11 @@ def start_canoe(cfg: dict[str, Any]) -> subprocess.Popen:
     return subprocess.Popen(args, cwd=workdir)
 
 
-def close_canoe(timeout_s: float = 8.0) -> int:
+def is_canoe_running() -> bool:
+    return bool(_canoe_processes())
+
+
+def close_canoe(timeout_s: float = 15.0) -> int:
     closed = 0
     for process in _canoe_processes():
         if _close_main_window(process["pid"]):
