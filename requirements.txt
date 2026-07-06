@@ -1,0 +1,2 @@
+# No external Python package is required.
+# Use 64-bit Python on Windows because CANoe / Vector Driver / ZLG DLL are normally 64-bit.

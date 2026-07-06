@@ -1,0 +1,62 @@
+{
+  "mode": "native",
+  "logLevel": "INFO",
+  "logDir": "logs",
+  "echoSuppression": true,
+  "echoWindowMs": 50,
+  "canfd": {
+    "arbitrationBitrate": 500000,
+    "dataBitrate": 2000000,
+    "canFdEnabled": false,
+    "brs": true,
+    "isoCanFd": true,
+    "forceFd": false,
+    "sjwAbr": 2,
+    "tseg1Abr": 63,
+    "tseg2Abr": 16,
+    "sjwDbr": 2,
+    "tseg1Dbr": 15,
+    "tseg2Dbr": 4
+  },
+  "vector": {
+    "dllPath": "vxlapi64.dll",
+    "applicationName": "ZLG_CANOE_BRIDGE",
+    "receiveTxOk": false
+  },
+  "zlg": {
+    "dllPath": "C:/Program Files (x86)/00_SoftWare/ZXDoc/zlgcan.dll",
+    "deviceType": 43,
+    "deviceIndex": 0,
+    "enableTermination": false,
+    "useSetValue": true,
+    "abitTiming": 0,
+    "dbitTiming": 0
+  },
+  "canoe": {
+    "exePath": "C:/Program Files (x86)/CANwin/Exec64/CANoe64.exe",
+    "configPath": "",
+    "autoStartAfterBridge": true
+  },
+  "channels": [
+    {
+      "name": "CH0",
+      "enabled": true,
+      "vector": {
+        "applicationChannel": 0
+      },
+      "zlg": {
+        "channelIndex": 0
+      }
+    },
+    {
+      "name": "CH1",
+      "enabled": false,
+      "vector": {
+        "applicationChannel": 1
+      },
+      "zlg": {
+        "channelIndex": 1
+      }
+    }
+  ]
+}

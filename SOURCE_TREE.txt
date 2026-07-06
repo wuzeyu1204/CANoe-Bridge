@@ -1,0 +1,21 @@
+ZLG_CANoe_Bridge_Python_CANFD_Source_v2/
+├─ main.py                                      入口脚本
+├─ requirements.txt                            Python依赖
+├─ config/
+│  ├─ bridge_config.json                       真机配置：Vector Virtual CAN + ZLG CANFD
+│  └─ bridge_config_mock.json                  离线模拟配置
+├─ tools/
+│  ├─ run_mock.bat                             离线模拟运行
+│  └─ run_native.bat                           真机运行
+├─ zlg_canoe_bridge/
+│  ├─ __main__.py                              命令行入口
+│  ├─ bridge.py                                双线程桥接核心
+│  ├─ frame.py                                 CAN/CANFD统一帧结构和DLC映射
+│  ├─ logger.py                                日志
+│  └─ adapters/
+│     ├─ base.py                               适配器接口
+│     ├─ mock.py                               离线模拟适配器
+│     ├─ vector_xl.py                          Vector XL Driver / Virtual CAN适配
+│     └─ zlg_zcan.py                           周立功ZCAN CANFD适配
+└─ docs/
+   └─ CANoe配置说明.md

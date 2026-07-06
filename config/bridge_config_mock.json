@@ -1,0 +1,23 @@
+{
+  "mode": "mock",
+  "logLevel": "DEBUG",
+  "logDir": "logs",
+  "echoSuppression": true,
+  "echoWindowMs": 50,
+  "canfd": {
+    "arbitrationBitrate": 500000,
+    "dataBitrate": 2000000,
+    "brs": true,
+    "isoCanFd": true
+  },
+  "channels": [
+    {
+      "name": "CH0",
+      "enabled": true
+    },
+    {
+      "name": "CH1",
+      "enabled": false
+    }
+  ]
+}

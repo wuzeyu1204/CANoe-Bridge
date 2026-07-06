@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Logs and runtime outputs
+logs/
+*.log
+
+# Local environment
+.venv/
+venv/
+env/
+.env
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local license/runtime state should not be committed.
+license.json
