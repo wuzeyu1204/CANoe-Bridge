@@ -137,6 +137,8 @@ class BridgeGui(tk.Tk):
         self.logger = self._create_logger("logs", "INFO")
         self.runtime: BridgeRuntime | None = None
         self.canoe_process: subprocess.Popen | None = None
+        self.settings_window: tk.Toplevel | None = None
+        self.pending_canoe_autostart = False
         self.cfg: dict[str, Any] = {}
         self.config_path = tk.StringVar(value=str(Path(config_path).resolve()))
 
@@ -203,36 +205,29 @@ class BridgeGui(tk.Tk):
         root = ttk.Frame(self, padding=12)
         root.pack(fill=tk.BOTH, expand=True)
 
-        top = ttk.Frame(root)
-        top.pack(fill=tk.X)
-        ttk.Label(top, text="Config").pack(side=tk.LEFT)
-        ttk.Entry(top, textvariable=self.config_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
-        ttk.Button(top, text="Browse", command=self._browse_config).pack(side=tk.LEFT)
-        ttk.Button(top, text="Load", command=self._load_from_path).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(top, text="Save", command=self._save_to_path).pack(side=tk.LEFT, padx=(8, 0))
+        header = ttk.Frame(root)
+        header.pack(fill=tk.X)
+        ttk.Label(header, text=APP_TITLE, font=("", 16, "bold")).pack(side=tk.LEFT)
+        ttk.Button(header, text="Floating Settings", command=self._show_settings_dialog).pack(side=tk.RIGHT)
+        ttk.Button(header, text="License", command=self._show_license_dialog).pack(side=tk.RIGHT, padx=(0, 8))
 
         status = ttk.Frame(root)
-        status.pack(fill=tk.X, pady=(12, 8))
+        status.pack(fill=tk.X, pady=(16, 8))
         self.start_button = ttk.Button(status, text="Start Bridge", command=self._start_bridge)
         self.start_button.pack(side=tk.LEFT)
-        self.stop_button = ttk.Button(status, text="Stop", command=self._stop_bridge, state=tk.DISABLED)
+        self.stop_button = ttk.Button(status, text="Pause Bridge", command=self._pause_bridge, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=(8, 16))
         ttk.Button(status, text="Start CANoe", command=self._start_canoe).pack(side=tk.LEFT)
         ttk.Button(status, text="Close CANoe", command=self._close_canoe).pack(side=tk.LEFT, padx=(8, 16))
-        ttk.Button(status, text="License", command=self._show_license_dialog).pack(side=tk.LEFT)
-        ttk.Label(status, textvariable=self.status_text, font=("", 10, "bold")).pack(side=tk.LEFT)
-        ttk.Label(status, textvariable=self.license_text).pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Label(status, textvariable=self.counter_text).pack(side=tk.RIGHT)
+        ttk.Label(status, textvariable=self.status_text, font=("", 11, "bold")).pack(side=tk.LEFT)
+        ttk.Label(status, textvariable=self.license_text).pack(side=tk.RIGHT)
 
-        body = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
-        body.pack(fill=tk.BOTH, expand=True)
+        counters = ttk.LabelFrame(root, text="Runtime Counters")
+        counters.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(counters, textvariable=self.counter_text, font=("", 11)).pack(anchor=tk.W, padx=10, pady=10)
 
-        settings = ttk.Frame(body, padding=(0, 0, 12, 0))
-        body.add(settings, weight=1)
-        logs = ttk.Frame(body)
-        body.add(logs, weight=2)
-
-        self._build_settings(settings)
+        logs = ttk.Frame(root)
+        logs.pack(fill=tk.BOTH, expand=True)
         self._build_logs(logs)
 
     def _build_settings(self, parent: ttk.Frame) -> None:
@@ -290,6 +285,45 @@ class BridgeGui(tk.Tk):
     def _row(self, parent: ttk.Frame, row: int, label: str, widget: ttk.Widget) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, padx=8, pady=4)
         widget.grid(row=row, column=1, sticky=tk.EW, padx=8, pady=4)
+
+    def _show_settings_dialog(self) -> None:
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.lift()
+            self.settings_window.focus_force()
+            return
+
+        dialog = tk.Toplevel(self)
+        self.settings_window = dialog
+        dialog.title("Floating Settings")
+        dialog.geometry("620x760")
+        dialog.transient(self)
+
+        shell = ttk.Frame(dialog, padding=12)
+        shell.pack(fill=tk.BOTH, expand=True)
+
+        config_bar = ttk.LabelFrame(shell, text="Config File")
+        config_bar.pack(fill=tk.X, pady=(0, 10))
+        ttk.Entry(config_bar, textvariable=self.config_path).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8, pady=8)
+        ttk.Button(config_bar, text="Browse", command=self._browse_config).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(config_bar, text="Load", command=self._load_from_path).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(config_bar, text="Save", command=self._save_to_path).pack(side=tk.LEFT, padx=(0, 8))
+
+        canvas = tk.Canvas(shell, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(shell, orient=tk.VERTICAL, command=canvas.yview)
+        content = ttk.Frame(canvas)
+        content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._build_settings(content)
+
+        def on_close() -> None:
+            self.settings_window = None
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
 
     def _browse_config(self) -> None:
         path = filedialog.askopenfilename(
@@ -438,16 +472,15 @@ class BridgeGui(tk.Tk):
             self.stop_button.configure(state=tk.NORMAL)
             self.status_text.set("Starting...")
             self._append_log("Start requested.")
-            if self.canoe_auto_start.get():
-                self._start_canoe()
+            self.pending_canoe_autostart = bool(self.canoe_auto_start.get())
         except Exception as exc:
             messagebox.showerror(APP_TITLE, f"Start failed:\n{exc}")
 
-    def _stop_bridge(self) -> None:
+    def _pause_bridge(self) -> None:
         if self.runtime:
             self.runtime.stop()
             self.status_text.set("Stopping...")
-            self._append_log("Stop requested.")
+            self._append_log("Pause requested.")
 
     def _start_canoe(self) -> None:
         try:
@@ -528,15 +561,20 @@ class BridgeGui(tk.Tk):
                 self.status_text.set("Running")
                 self.start_button.configure(state=tk.DISABLED)
                 self.stop_button.configure(state=tk.NORMAL)
+                if self.pending_canoe_autostart:
+                    self.pending_canoe_autostart = False
+                    self._start_canoe()
             elif status == "starting":
                 self.status_text.set("Starting...")
             elif status == "stopping":
                 self.status_text.set("Stopping...")
             elif status == "error":
+                self.pending_canoe_autostart = False
                 self.status_text.set(f"Error: {snapshot['error']}")
                 self.start_button.configure(state=tk.NORMAL)
                 self.stop_button.configure(state=tk.DISABLED)
             else:
+                self.pending_canoe_autostart = False
                 self.status_text.set("Stopped")
                 self.start_button.configure(state=tk.NORMAL)
                 self.stop_button.configure(state=tk.DISABLED)

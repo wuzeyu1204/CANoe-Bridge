@@ -27,7 +27,7 @@
    tools\run_gui.bat
    ```
 
-4. 在 GUI 中确认配置：
+4. 主界面只保留运行控制、计数和日志。点击 `Floating Settings` 打开悬浮设置窗口，在其中确认配置：
    - `Vector App name`: `ZLG_CANOE_BRIDGE`
    - `Vector App channel`: `0`
    - `ZLG Device type`: `43`
@@ -38,9 +38,21 @@
 7. 如果勾选 `Open CANoe after bridge starts`，工具会在启动桥接后自动打开 CANoe。
 8. 在 CANoe 中启动 Measurement，使用 Diagnostic Console 或 Trace。
 
+## 主界面和悬浮设置
+
+主界面用于运行控制：
+
+- `Start Bridge`: 打开 Vector Virtual CAN 和 ZLG 硬件通道，启动透明转发。
+- `Pause Bridge`: 暂停桥接并释放 Vector / ZLG adapter；桥接不会在后台继续占用设备。
+- `Start CANoe`: 打开 CANoe。
+- `Close CANoe`: 温和关闭 CANoe 主窗口。
+- `Floating Settings`: 打开悬浮设置窗口，配置文件路径、CANoe 路径、Vector、ZLG、CAN/CAN FD 参数都在这里维护。
+
+关闭 GUI 时，如果桥接还在运行，程序会先请求停止桥接，再退出。
+
 ## CANoe 启动和关闭
 
-GUI 顶部提供两个按钮：
+GUI 主界面提供两个 CANoe 按钮：
 
 - `Start CANoe`: 按配置中的 `canoe.exePath` 打开 CANoe；如果填写了 `canoe.configPath`，会同时打开指定工程。
 - `Close CANoe`: 向 CANoe 主窗口发送关闭请求，优先温和关闭，不强制杀进程。
@@ -114,8 +126,10 @@ assets\app_icon.ico
 ## 已实现功能
 
 - GUI 启动/停止桥接。
+- GUI 启动/暂停桥接，暂停时释放 adapter，不保持后台占用。
 - GUI 启动/关闭 CANoe。
 - 启动桥接后自动打开 CANoe。
+- 主界面运行面板化，配置迁移到 `Floating Settings` 悬浮设置窗口。
 - Vector XL Driver API 连接 Vector Virtual CAN / CAN FD。
 - ZLG ZCAN API 连接 USBCANFD-100U-mini。
 - Classical CAN 透明转发。
