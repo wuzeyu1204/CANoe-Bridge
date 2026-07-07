@@ -62,7 +62,7 @@ config/bridge_config.json
 - 桥接模式：原生桥接 / 调试模式
 - 日志等级：DEBUG / INFO / WARNING / ERROR
 - 启动桥接前自动打开 CANoe
-- 启动时自动检测 ZLG 设备
+- 启动前提示 ZLG 检测建议（不预占用设备）
 - 启用回环抑制
 - 回环抑制时间窗口 ms
 
@@ -116,11 +116,11 @@ config/bridge_config.json
 3. 配置文件是否存在。
 4. CANoe 程序路径是否存在。
 5. ZLG DLL 路径是否存在。
-6. ZLG 设备是否可打开。
+6. ZLG DLL 路径是否有效；ZLG 设备在正式桥接启动时打开，不在启动前自检中预占用。
 7. Vector 应用名称是否为空。
 8. CAN/CANFD 波特率配置是否完整。
 9. Classical CAN 模式下配置了 CANFD 参数时给出提示。
-10. ZCAN_OpenDevice 失败时提示可能被 ZXDoc/ZCANPRO 占用。
+10. ZCAN_OpenDevice / ZCAN_StartCAN 失败时提示可能被 ZXDoc/ZCANPRO 占用或 SDK/驱动状态异常。
 
 典型 ZLG 打开失败提示：
 
@@ -197,6 +197,8 @@ assets\app_icon.ico
 - 启动桥接、暂停桥接、停止桥接。
 - 暂停/停止时释放 Vector/ZLG 通道，不在后台持续桥接。
 - 启动桥接前检查/启动 CANoe；关闭 CANoe 时联动停止桥接。
+- CANoe 进程检测只识别 CANoe.exe / CANoe32.exe / CANoe64.exe，不会把本工具误判为 CANoe。
+- ZLG 通道启动阶段带一次受控重试，用于规避 SDK/驱动偶发启动时序失败。
 - 启动 CANoe、关闭 CANoe。
 - 高频报文日志默认不刷屏，避免 GUI 未响应。
 - 启动前自检。

@@ -210,7 +210,7 @@ class BridgeGui(tk.Tk):
         self.force_fd = tk.BooleanVar(value=False)
         self.termination = tk.BooleanVar(value=False)
         self.echo_suppression = tk.BooleanVar(value=True)
-        self.auto_detect_zlg = tk.BooleanVar(value=True)
+        self.auto_detect_zlg = tk.BooleanVar(value=False)
         self.auto_reconnect = tk.BooleanVar(value=False)
         self.channel_enabled = tk.BooleanVar(value=True)
         self.canoe_exe = tk.StringVar(value=find_canoe_exe())
@@ -403,7 +403,7 @@ class BridgeGui(tk.Tk):
         self._row(basic, 0, "桥接模式", ttk.Combobox(basic, textvariable=self.mode, values=("原生桥接", "调试模式"), state="readonly"))
         self._row(basic, 1, "日志等级", ttk.Combobox(basic, textvariable=self.log_level, values=("DEBUG", "INFO", "WARNING", "ERROR"), state="readonly"))
         ttk.Checkbutton(basic, text="启动桥接前自动打开 CANoe", variable=self.canoe_auto_start).grid(row=2, column=1, sticky=tk.W, padx=8, pady=5)
-        ttk.Checkbutton(basic, text="启动时自动检测 ZLG 设备", variable=self.auto_detect_zlg).grid(row=3, column=1, sticky=tk.W, padx=8, pady=5)
+        ttk.Checkbutton(basic, text="启动前提示 ZLG 检测建议（不预占用设备）", variable=self.auto_detect_zlg).grid(row=3, column=1, sticky=tk.W, padx=8, pady=5)
         ttk.Checkbutton(basic, text="启用回环抑制", variable=self.echo_suppression).grid(row=4, column=1, sticky=tk.W, padx=8, pady=5)
         self._row(basic, 5, "回环抑制时间窗口 ms", ttk.Entry(basic, textvariable=self.echo_window))
 
@@ -545,7 +545,7 @@ class BridgeGui(tk.Tk):
         self.log_level.set(str(cfg.get("logLevel", "INFO")).upper())
         self.echo_suppression.set(bool(channel.get("echoSuppression", cfg.get("echoSuppression", True))))
         self.echo_window.set(str(channel.get("echoWindowMs", cfg.get("echoWindowMs", 50))))
-        self.auto_detect_zlg.set(bool(cfg.get("autoDetectZlgOnStart", True)))
+        self.auto_detect_zlg.set(bool(cfg.get("autoDetectZlgOnStart", False)))
         self.auto_reconnect.set(bool(cfg.get("autoReconnect", False)))
         self.reconnect_interval.set(str(cfg.get("autoReconnectIntervalMs", 1000)))
         self.rx_queue_len.set(str(cfg.get("rxQueueLength", 8192)))
@@ -859,18 +859,8 @@ class BridgeGui(tk.Tk):
         if not canfd.get("canFdEnabled") and (self.brs.get() or self.iso_canfd.get()):
             warnings.append("当前为 Classical CAN 模式，BRS/ISO CAN FD 参数不会参与实际发送。")
 
-        if cfg.get("autoDetectZlgOnStart", True) and not errors:
-            ok = self._detect_device(show_popup=False)
-            if not ok:
-                errors.append(
-                    "ZLG 设备检测失败。\n"
-                    "可能原因：\n"
-                    "1. ZXDoc 或 ZCANPRO 正在占用设备；\n"
-                    "2. 设备类型选择错误；\n"
-                    "3. ZLG DLL 路径错误；\n"
-                    "4. 驱动未安装或版本不匹配。\n"
-                    "建议先关闭 ZXDoc/ZCANPRO，然后点击【设备检测】重新检测。"
-                )
+        if cfg.get("autoDetectZlgOnStart", False):
+            warnings.append("为避免 ZLG SDK Open/Close 时序影响正式启动，启动前不再预打开 ZLG 设备；设备会在桥接启动时由正式通道打开。")
         return errors, warnings
 
     def _show_license_dialog(self) -> None:

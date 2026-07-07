@@ -4,6 +4,7 @@
   "logDir": "logs",
   "echoSuppression": true,
   "echoWindowMs": 50,
+  "autoDetectZlgOnStart": false,
   "canfd": {
     "arbitrationBitrate": 500000,
     "dataBitrate": 2000000,
@@ -29,6 +30,8 @@
     "deviceIndex": 0,
     "enableTermination": false,
     "useSetValue": true,
+    "openRetries": 2,
+    "openRetryDelayS": 0.8,
     "abitTiming": 0,
     "dbitTiming": 0
   },

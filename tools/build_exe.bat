@@ -7,7 +7,7 @@ python -m PyInstaller ^
   --clean ^
   --onefile ^
   --windowed ^
-  --name ZLG_CANoe_Bridge_GUI ^
+  --name ZLG_CANoe_Bridge ^
   --icon assets\app_icon.ico ^
   --add-data "config\bridge_config.json;config" ^
   --add-data "assets\app_icon.ico;assets" ^
@@ -22,4 +22,4 @@ if exist dist\logs rmdir /S /Q dist\logs
 mkdir dist\logs
 
 echo.
-echo Built: dist\ZLG_CANoe_Bridge_GUI.exe
+echo Built: dist\ZLG_CANoe_Bridge.exe

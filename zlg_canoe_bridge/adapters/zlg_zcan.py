@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes as ct
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -109,6 +110,19 @@ class ZlgZcanAdapter(CanAdapter):
         self.chn = None
 
     def open(self) -> None:
+        attempts = int(self.cfg.get("openRetries", 2))
+        delay_s = float(self.cfg.get("openRetryDelayS", 0.8))
+        for attempt in range(1, attempts + 1):
+            try:
+                self._open_once()
+                return
+            except RuntimeError as exc:
+                self.close()
+                if "CHANNEL_START_FAILED" not in str(exc) or attempt >= attempts:
+                    raise
+                time.sleep(delay_s)
+
+    def _open_once(self) -> None:
         dll_file = Path(self.dll_path)
         if os.name == "nt" and dll_file.parent != Path("."):
             dll_dir = dll_file.resolve().parent
@@ -159,10 +173,8 @@ class ZlgZcanAdapter(CanAdapter):
             raise RuntimeError(f"CHANNEL_START_FAILED: ZCAN_StartCAN failed, ret={ret}")
 
     def close(self) -> None:
-        if self.dll is None:
-            return
         try:
-            if self.dev:
+            if self.dll is not None and self.dev:
                 self.dll.ZCAN_CloseDevice(self.dev)
         finally:
             self.dev = None

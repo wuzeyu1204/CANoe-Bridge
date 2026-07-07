@@ -57,7 +57,8 @@ def _canoe_processes() -> list[dict[str, Any]]:
             "powershell",
             "-NoProfile",
             "-Command",
-            "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'CANoe' } | "
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -match '^CANoe(32|64)?\\.exe$' } | "
             "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress",
         ],
         capture_output=True,
