@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes as ct
+import logging
 import os
 import time
 from pathlib import Path
@@ -11,12 +12,17 @@ from zlg_canoe_bridge.frame import CanFdFrame, dlc_to_len
 
 STATUS_OK = 1
 TYPE_CANFD = 1
+TYPE_CAN = 0
 
 CANFD_BRS = 0x01
 CANFD_ESI = 0x02
 ZCAN_ID_EFF_FLAG = 0x80000000
 ZCAN_ID_RTR_FLAG = 0x40000000
 ZCAN_ID_ERR_FLAG = 0x20000000
+
+# These ZCAN device families use the CAN FD controller initialization layout
+# even when the application intentionally accepts/transmits classic CAN only.
+ZCAN_CANFD_CONTROLLER_DEVICE_TYPES = {41, 42, 43, 59, 76, 77, 80, 81, 85, 86, 87, 99}
 
 
 class ZCAN_CHANNEL_CANFD_INIT_CONFIG(ct.Structure):
@@ -33,11 +39,38 @@ class ZCAN_CHANNEL_CANFD_INIT_CONFIG(ct.Structure):
     ]
 
 
+class ZCAN_CHANNEL_CAN_INIT_CONFIG(ct.Structure):
+    _fields_ = [
+        ("acc_code", ct.c_uint),
+        ("acc_mask", ct.c_uint),
+        ("reserved", ct.c_uint),
+        ("filter", ct.c_ubyte),
+        ("timing0", ct.c_ubyte),
+        ("timing1", ct.c_ubyte),
+        ("mode", ct.c_ubyte),
+    ]
+
+
+class ZCAN_CHANNEL_INIT_UNION(ct.Union):
+    _fields_ = [
+        ("can", ZCAN_CHANNEL_CAN_INIT_CONFIG),
+        ("canfd", ZCAN_CHANNEL_CANFD_INIT_CONFIG),
+    ]
+
+
 class ZCAN_CHANNEL_INIT_CONFIG(ct.Structure):
     _fields_ = [
         ("can_type", ct.c_uint),
-        ("canfd", ZCAN_CHANNEL_CANFD_INIT_CONFIG),
+        ("config", ZCAN_CHANNEL_INIT_UNION),
     ]
+
+    @property
+    def canfd(self):
+        return self.config.canfd
+
+    @property
+    def can(self):
+        return self.config.can
 
 
 class ZCAN_CANFD_FRAME(ct.Structure):
@@ -91,6 +124,10 @@ class ZCAN_ReceiveFD_Data(ct.Structure):
 
 
 class ZlgZcanAdapter(CanAdapter):
+    # transmit_type=0 and the normal ZCAN receive APIs provide bus RX frames,
+    # not a separate transmit-confirmation event stream.
+    rx_only = True
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.dll_path = cfg.get("dllPath", "zlgcan.dll")
@@ -101,13 +138,17 @@ class ZlgZcanAdapter(CanAdapter):
         self.arb_bitrate = int(cfg.get("arbitrationBitrate", 500000))
         self.data_bitrate = int(cfg.get("dataBitrate", 2000000))
         self.can_fd_enabled = bool(cfg.get("canFdEnabled", True))
+        default_controller_type = TYPE_CANFD if self.device_type in ZCAN_CANFD_CONTROLLER_DEVICE_TYPES else TYPE_CAN
+        self.controller_can_type = int(cfg.get("controllerCanType", default_controller_type))
         self.iso_canfd = bool(cfg.get("isoCanFd", True))
+        self.brs_enabled = bool(cfg.get("brs", True))
         self.use_set_value = bool(cfg.get("useSetValue", True))
         self.tx_timeout_ms = int(cfg.get("txTimeoutMs", 1000))
         self.dll = None
         self.dll_dir_handles = []
         self.dev = None
         self.chn = None
+        self.log = logging.getLogger("zlg_canoe_bridge")
 
     def open(self) -> None:
         attempts = int(self.cfg.get("openRetries", 2))
@@ -152,14 +193,20 @@ class ZlgZcanAdapter(CanAdapter):
             self._set_value(f"{self.channel_index}/tx_timeout", str(self.tx_timeout_ms))
 
         init = ZCAN_CHANNEL_INIT_CONFIG()
-        init.can_type = TYPE_CANFD
-        init.canfd.acc_code = 0
-        init.canfd.acc_mask = 0xFFFFFFFF
-        init.canfd.brp = 0
-        init.canfd.filter = 0
-        init.canfd.mode = 0
-        init.canfd.abit_timing = int(self.cfg.get("abitTiming", 0))
-        init.canfd.dbit_timing = int(self.cfg.get("dbitTiming", 0))
+        init.can_type = self.controller_can_type
+        if self.controller_can_type == TYPE_CANFD:
+            init.canfd.acc_code = 0
+            init.canfd.acc_mask = 0xFFFFFFFF
+            init.canfd.brp = 0
+            init.canfd.filter = 0
+            init.canfd.mode = 0
+            init.canfd.abit_timing = int(self.cfg.get("abitTiming", 0))
+            init.canfd.dbit_timing = int(self.cfg.get("dbitTiming", 0))
+        else:
+            init.can.acc_code = 0
+            init.can.acc_mask = 0xFFFFFFFF
+            init.can.filter = 0
+            init.can.mode = 0
 
         self.chn = self.dll.ZCAN_InitCAN(self.dev, self.channel_index, ct.byref(init))
         if not self.chn:
@@ -171,9 +218,20 @@ class ZlgZcanAdapter(CanAdapter):
         ret = self.dll.ZCAN_StartCAN(self.chn)
         if ret != STATUS_OK:
             raise RuntimeError(f"CHANNEL_START_FAILED: ZCAN_StartCAN failed, ret={ret}")
+        self.log.info(
+            "[ZLG] Channel owner: Bridge | Mode: %s | Controller: %s | Channel: %d | Nominal bitrate: %d | "
+            "Data bitrate: %s | BRS: %s | Termination: %s",
+            "CAN FD" if self.can_fd_enabled else "Classic CAN",
+            "TYPE_CANFD" if self.controller_can_type == TYPE_CANFD else "TYPE_CAN",
+            self.channel_index, self.arb_bitrate,
+            str(self.data_bitrate) if self.can_fd_enabled else "N/A",
+            "Yes" if self.can_fd_enabled and self.brs_enabled else "No", "On" if self.termination else "Off",
+        )
 
     def close(self) -> None:
         try:
+            if self.dll is not None and self.chn and hasattr(self.dll, "ZCAN_ResetCAN"):
+                self.dll.ZCAN_ResetCAN(self.chn)
             if self.dll is not None and self.dev:
                 self.dll.ZCAN_CloseDevice(self.dev)
         finally:
@@ -185,9 +243,11 @@ class ZlgZcanAdapter(CanAdapter):
 
     def send(self, frame: CanFdFrame) -> None:
         assert self.dll is not None and self.chn is not None
-        if not self.can_fd_enabled:
+        if not frame.is_fd:
             self._send_classic(frame)
             return
+        if not self.can_fd_enabled:
+            raise ValueError("Classic CAN ZLG channel cannot transmit a CAN FD frame")
         tx = ZCAN_TransmitFD_Data()
         can_id = frame.can_id & (0x1FFFFFFF if frame.is_extended else 0x7FF)
         if frame.is_extended:
@@ -195,7 +255,7 @@ class ZlgZcanAdapter(CanAdapter):
         if frame.is_remote:
             can_id |= ZCAN_ID_RTR_FLAG
         tx.frame.can_id = can_id
-        tx.frame.len = len(frame.data)
+        tx.frame.len = dlc_to_len(frame.dlc)
         flags = 0
         if frame.brs:
             flags |= CANFD_BRS
@@ -213,6 +273,21 @@ class ZlgZcanAdapter(CanAdapter):
         assert self.dll is not None and self.chn is not None
         if not self.can_fd_enabled:
             return self._receive_classic(timeout_ms)
+        # A CAN FD-capable ZCAN channel has separate classic-CAN and CAN-FD
+        # receive APIs/queues. Poll both so a mixed bus does not lose classic frames.
+        deadline = time.monotonic() + max(timeout_ms, 0) / 1000.0
+        while True:
+            classic = self._receive_classic(0)
+            if classic is not None:
+                return classic
+            fd = self._receive_fd(0)
+            if fd is not None:
+                return fd
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.001)
+
+    def _receive_fd(self, timeout_ms: int) -> Optional[CanFdFrame]:
         rx = ZCAN_ReceiveFD_Data()
         ret = self.dll.ZCAN_ReceiveFD(self.chn, ct.byref(rx), 1, timeout_ms)
         if ret <= 0:
@@ -223,7 +298,7 @@ class ZlgZcanAdapter(CanAdapter):
         can_id = raw_id & (0x1FFFFFFF if is_ext else 0x7FF)
         length = int(rx.frame.len)
         if length > 64:
-            length = dlc_to_len(length & 0x0F)
+            raise ValueError(f"invalid ZCAN CAN FD data length: {length}")
         data = bytes(rx.frame.data[:length])
         flags = int(rx.frame.flags)
         return CanFdFrame(
@@ -235,6 +310,8 @@ class ZlgZcanAdapter(CanAdapter):
             esi=bool(flags & CANFD_ESI),
             is_remote=is_rtr,
             timestamp_us=int(rx.timestamp),
+            channel=self.channel_index,
+            dlc_value=frame_dlc_from_length(length),
         )
 
     def _send_classic(self, frame: CanFdFrame) -> None:
@@ -247,7 +324,7 @@ class ZlgZcanAdapter(CanAdapter):
         if frame.is_remote:
             can_id |= ZCAN_ID_RTR_FLAG
         tx.frame.can_id = can_id
-        tx.frame.can_dlc = len(frame.data)
+        tx.frame.can_dlc = frame.dlc
         setattr(tx.frame, "__pad", 0)
         setattr(tx.frame, "__res0", 0)
         setattr(tx.frame, "__res1", 0)
@@ -270,13 +347,15 @@ class ZlgZcanAdapter(CanAdapter):
         length = min(int(rx.frame.can_dlc), 8)
         return CanFdFrame(
             can_id=can_id,
-            data=bytes(rx.frame.data[:length]),
+            data=b"" if is_rtr else bytes(rx.frame.data[:length]),
             is_fd=False,
             is_extended=is_ext,
             brs=False,
             esi=False,
             is_remote=is_rtr,
             timestamp_us=int(rx.timestamp),
+            channel=self.channel_index,
+            dlc_value=int(rx.frame.can_dlc),
         )
 
     def _set_value(self, path: str, value: str) -> None:
@@ -295,8 +374,8 @@ class ZlgZcanAdapter(CanAdapter):
             "ZCAN_ReceiveFD",
             "ZCAN_SetValue",
         ]
-        if not self.can_fd_enabled:
-            required.extend(["ZCAN_Transmit", "ZCAN_Receive"])
+        # Classic CAN and CAN FD frames use distinct ZCAN APIs even on an FD channel.
+        required.extend(["ZCAN_Transmit", "ZCAN_Receive"])
         missing = [name for name in required if not hasattr(d, name)]
         if missing:
             raise RuntimeError(f"API_SYMBOLS_MISSING: {', '.join(missing)}")
@@ -309,6 +388,9 @@ class ZlgZcanAdapter(CanAdapter):
         d.ZCAN_InitCAN.restype = ct.c_void_p
         d.ZCAN_StartCAN.argtypes = [ct.c_void_p]
         d.ZCAN_StartCAN.restype = ct.c_uint
+        if hasattr(d, "ZCAN_ResetCAN"):
+            d.ZCAN_ResetCAN.argtypes = [ct.c_void_p]
+            d.ZCAN_ResetCAN.restype = ct.c_uint
         d.ZCAN_TransmitFD.argtypes = [ct.c_void_p, ct.POINTER(ZCAN_TransmitFD_Data), ct.c_uint]
         d.ZCAN_TransmitFD.restype = ct.c_uint
         d.ZCAN_ReceiveFD.argtypes = [ct.c_void_p, ct.POINTER(ZCAN_ReceiveFD_Data), ct.c_uint, ct.c_int]
@@ -321,3 +403,9 @@ class ZlgZcanAdapter(CanAdapter):
             d.ZCAN_Receive.restype = ct.c_uint
         d.ZCAN_SetValue.argtypes = [ct.c_void_p, ct.c_char_p, ct.c_char_p]
         d.ZCAN_SetValue.restype = ct.c_uint
+
+
+def frame_dlc_from_length(length: int) -> int:
+    """Convert the ZCAN CAN FD byte-length field to its canonical DLC."""
+    from zlg_canoe_bridge.frame import len_to_dlc
+    return len_to_dlc(length)

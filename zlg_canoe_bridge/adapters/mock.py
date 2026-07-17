@@ -8,6 +8,8 @@ from zlg_canoe_bridge.frame import CanFdFrame
 
 class MockAdapter(CanAdapter):
     """Offline adapter for checking the bridge without CANoe/ZLG hardware."""
+    rx_only = True
+
     def __init__(self, name: str):
         self.name = name
         self.rx: "queue.Queue[CanFdFrame]" = queue.Queue()

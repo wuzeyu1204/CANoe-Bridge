@@ -59,7 +59,7 @@ Application Channel 0 → Virtual CAN 1
 Python 配置文件要对应：
 
 ```json
-"applicationName": "ZLG_CANOE_BRIDGE",
+"app_name": "ZLG_CANOE_BRIDGE",
 "applicationChannel": 0
 ```
 

@@ -26,3 +26,5 @@ Thumbs.db
 
 # Local license/runtime state should not be committed.
 license.json
+license_private/
+*.lic

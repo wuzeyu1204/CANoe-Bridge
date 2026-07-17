@@ -21,11 +21,11 @@ from typing import Any
 from zlg_canoe_bridge.__main__ import build_adapters, channel_configs, load_config
 from zlg_canoe_bridge.bridge import BridgeCore
 from zlg_canoe_bridge.canoe_control import close_canoe, find_canoe_exe, is_canoe_running, start_canoe
-from zlg_canoe_bridge.license import current_license, generate_license, machine_id, register_license
+from zlg_canoe_bridge.license import current_license, machine_id, register_license
 
 
 APP_TITLE = "CANoe-ZLG CAN/CANFD 桥接工具"
-APP_VERSION = "V1.0.0"
+APP_VERSION = "V1.0.1"
 DEFAULT_CONFIG = "config/bridge_config.json"
 
 BRIDGE_TEXT = {
@@ -103,12 +103,8 @@ class BridgeRuntime:
             "status": status,
             "error": error,
             "bridges": [
-                {
-                    "name": bridge.name,
-                    "v2z": bridge.count_v2z,
-                    "z2v": bridge.count_z2v,
-                    "drop": bridge.count_drop,
-                }
+                {"name": bridge.name, "v2z": bridge.count_v2z, "z2v": bridge.count_z2v,
+                 "drop": bridge.count_drop, **bridge.status()}
                 for bridge in self.bridges
             ],
         }
@@ -129,8 +125,11 @@ class BridgeRuntime:
                     zlg,
                     self.log,
                     echo_suppression=bool(channel.get("echoSuppression", self.cfg.get("echoSuppression", True))),
-                    echo_window_ms=int(channel.get("echoWindowMs", self.cfg.get("echoWindowMs", 50))),
+                    echo_window_ms=int(channel.get("echoWindowMs", self.cfg.get("echoWindowMs", 5))),
                     name=str(channel.get("name", "CH0")),
+                    queue_size=int(channel.get("queueSize", self.cfg.get("queueSize", 1024))),
+                    reconnect_initial_s=float(self.cfg.get("reconnectInitialMs", 250)) / 1000.0,
+                    reconnect_max_s=float(self.cfg.get("reconnectMaxMs", 5000)) / 1000.0,
                 )
                 self.bridges.append(bridge)
 
@@ -173,6 +172,8 @@ class BridgeGui(tk.Tk):
         self.canoe_process: subprocess.Popen | None = None
         self.settings_window: tk.Toplevel | None = None
         self.pending_canoe_autostart = False
+        self.waiting_for_canoe = False
+        self.canoe_wait_deadline = 0.0
         self.user_paused = False
         self.close_after_stop = False
         self.cfg: dict[str, Any] = {}
@@ -200,7 +201,7 @@ class BridgeGui(tk.Tk):
         self.data_bitrate = tk.StringVar(value="2M")
         self.sample_point = tk.StringVar(value="80%")
         self.tx_timeout = tk.StringVar(value="1000")
-        self.echo_window = tk.StringVar(value="50")
+        self.echo_window = tk.StringVar(value="5")
         self.reconnect_interval = tk.StringVar(value="1000")
         self.channel_name = tk.StringVar(value="CH0")
         self.can_mode = tk.StringVar(value="Classical CAN")
@@ -211,7 +212,7 @@ class BridgeGui(tk.Tk):
         self.termination = tk.BooleanVar(value=False)
         self.echo_suppression = tk.BooleanVar(value=True)
         self.auto_detect_zlg = tk.BooleanVar(value=False)
-        self.auto_reconnect = tk.BooleanVar(value=False)
+        self.auto_reconnect = tk.BooleanVar(value=True)
         self.channel_enabled = tk.BooleanVar(value=True)
         self.canoe_exe = tk.StringVar(value=find_canoe_exe())
         self.canoe_config = tk.StringVar(value="")
@@ -544,16 +545,17 @@ class BridgeGui(tk.Tk):
         self.mode.set(MODE_TEXT.get(str(cfg.get("mode", "native")).lower(), "原生桥接"))
         self.log_level.set(str(cfg.get("logLevel", "INFO")).upper())
         self.echo_suppression.set(bool(channel.get("echoSuppression", cfg.get("echoSuppression", True))))
-        self.echo_window.set(str(channel.get("echoWindowMs", cfg.get("echoWindowMs", 50))))
+        self.echo_window.set(str(channel.get("echoWindowMs", cfg.get("echoWindowMs", 5))))
         self.auto_detect_zlg.set(bool(cfg.get("autoDetectZlgOnStart", False)))
-        self.auto_reconnect.set(bool(cfg.get("autoReconnect", False)))
+        self.auto_reconnect.set(bool(cfg.get("autoReconnect", True)))
         self.reconnect_interval.set(str(cfg.get("autoReconnectIntervalMs", 1000)))
-        self.rx_queue_len.set(str(cfg.get("rxQueueLength", 8192)))
+        self.rx_queue_len.set(str(cfg.get("queueSize", cfg.get("rxQueueLength", 1024))))
 
         self.vector_dll.set(str(vector.get("dllPath", "vxlapi64.dll")))
-        self.vector_app.set(str(vector.get("applicationName", "ZLG_CANOE_BRIDGE")))
-        self.vector_channel.set(str(vector.get("applicationChannel", 0)))
-        self.vector_app_channel.set(str(vector.get("applicationChannel", 0)))
+        self.vector_app.set(str(vector.get("app_name", vector.get("applicationName", "ZLG_CANOE_BRIDGE"))))
+        vector_channel = vector.get("channel", vector.get("applicationChannel", 0))
+        self.vector_channel.set(str(vector_channel))
+        self.vector_app_channel.set(str(vector_channel))
 
         device_type = int(zlg.get("deviceType", 43))
         self.zlg_dll.set(str(zlg.get("dllPath", "zlgcan.dll")))
@@ -594,6 +596,7 @@ class BridgeGui(tk.Tk):
         cfg["autoReconnect"] = bool(self.auto_reconnect.get())
         cfg["autoReconnectIntervalMs"] = self._int(self.reconnect_interval.get(), "自动重连间隔")
         cfg["rxQueueLength"] = self._int(self.rx_queue_len.get(), "ZLG 接收队列长度")
+        cfg["queueSize"] = cfg["rxQueueLength"]
 
         cfg.setdefault("canfd", {})
         cfg["canfd"].update(
@@ -613,6 +616,9 @@ class BridgeGui(tk.Tk):
             {
                 "dllPath": self.vector_dll.get().strip() or "vxlapi64.dll",
                 "applicationName": self.vector_app.get().strip(),
+                "app_name": self.vector_app.get().strip(),
+                "channel_owner": str(cfg["vector"].get("channel_owner", "canoe")),
+                "shared_virtual_channel": bool(cfg["vector"].get("shared_virtual_channel", True)),
                 "receiveTxOk": False,
             }
         )
@@ -638,6 +644,7 @@ class BridgeGui(tk.Tk):
         channel.setdefault("vector", {})
         channel.setdefault("zlg", {})
         app_channel = self._int(self.vector_channel.get(), "Vector 应用通道")
+        channel["vector"]["channel"] = app_channel
         channel["vector"]["applicationChannel"] = app_channel
         channel["zlg"]["channelIndex"] = self._int(self.zlg_channel.get(), "通道索引 channelIndex")
         self.vector_app_channel.set(str(app_channel))
@@ -662,22 +669,36 @@ class BridgeGui(tk.Tk):
                     self._log("ERROR", "CANoe 未启动，已取消桥接启动，ZLG 硬件不会被占用。")
                     return
                 self.bridge_state.set("等待 CANoe")
+                self.waiting_for_canoe = True
+                self.canoe_wait_deadline = time.monotonic() + 20.0
                 self._update_button_states("starting")
-                self.after(8000, self._start_bridge_after_canoe)
+                self._refresh_channel_table(status_override="等待 CANoe")
+                self.after(250, self._wait_for_canoe_then_start)
                 return
             self._start_bridge_now()
         except Exception as exc:
             messagebox.showerror(APP_TITLE, f"启动桥接失败：\n{_friendly_error(str(exc))}")
 
-    def _start_bridge_after_canoe(self) -> None:
-        if not is_canoe_running():
+    def _wait_for_canoe_then_start(self) -> None:
+        if not self.waiting_for_canoe:
+            return
+        if is_canoe_running():
+            self.waiting_for_canoe = False
+            self.canoe_state.set("进程已启动")
+            self._log("INFO", "已检测到 CANoe 进程，立即启动桥接。")
+            self._start_bridge_now()
+            return
+        if time.monotonic() >= self.canoe_wait_deadline:
+            self.waiting_for_canoe = False
             self.bridge_state.set("未启动")
             self._update_button_states("stopped")
-            self._log("ERROR", "CANoe 进程未检测到，桥接未启动。请确认 CANoe 已正常打开后重试。")
+            self._refresh_channel_table(status_override="未启动")
+            self._log("ERROR", "20 秒内未检测到 CANoe 进程，桥接未启动。请确认 CANoe 已正常打开后重试。")
             return
-        self._start_bridge_now()
+        self.after(250, self._wait_for_canoe_then_start)
 
     def _start_bridge_now(self) -> None:
+        self.waiting_for_canoe = False
         errors, warnings = self._preflight(self.cfg)
         if warnings:
             self._log("WARNING", "\n".join(warnings))
@@ -693,6 +714,7 @@ class BridgeGui(tk.Tk):
         self.runtime = BridgeRuntime(copy.deepcopy(self.cfg), self.logger)
         self.user_paused = False
         self.pending_canoe_autostart = False
+        self.waiting_for_canoe = False
         self.runtime.start()
         self.bridge_state.set("启动中")
         self.bus_state.set("未知")
@@ -709,6 +731,7 @@ class BridgeGui(tk.Tk):
         runtime = self.runtime
         self.user_paused = paused
         self.pending_canoe_autostart = False
+        self.waiting_for_canoe = False
         if runtime:
             runtime.stop()
         self.bridge_state.set("停止中")
@@ -871,29 +894,38 @@ class BridgeGui(tk.Tk):
         dialog.geometry("700x460")
 
         lic = current_license()
-        owner = tk.StringVar(value=lic.owner or "WDJR")
-        expires = tk.StringVar(value=lic.expires or "2099-12-31")
 
         frame = ttk.Frame(dialog, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text=f"机器码：{machine_id()}").pack(anchor=tk.W)
+        machine = machine_id()
+        machine_row = ttk.Frame(frame)
+        machine_row.pack(fill=tk.X)
+        ttk.Label(machine_row, text=f"机器码：{machine}").pack(side=tk.LEFT)
         ttk.Label(frame, text=f"授权状态：{_license_text(lic)}").pack(anchor=tk.W, pady=(0, 8))
 
-        form = ttk.Frame(frame)
-        form.pack(fill=tk.X)
-        ttk.Label(form, text="版权所有者").grid(row=0, column=0, sticky=tk.W, pady=4)
-        ttk.Entry(form, textvariable=owner).grid(row=0, column=1, sticky=tk.EW, padx=8, pady=4)
-        ttk.Label(form, text="到期日期").grid(row=1, column=0, sticky=tk.W, pady=4)
-        ttk.Entry(form, textvariable=expires).grid(row=1, column=1, sticky=tk.EW, padx=8, pady=4)
-        form.columnconfigure(1, weight=1)
+        ttk.Label(
+            frame,
+            text="请粘贴供应方提供的注册码，或导入随软件收到的 .lic 授权文件。",
+        ).pack(anchor=tk.W, pady=(4, 0))
 
         text = ScrolledText(frame, height=9, wrap=tk.WORD)
         text.pack(fill=tk.BOTH, expand=True, pady=8)
 
-        def generate() -> None:
-            generated = generate_license(owner.get(), expires.get(), machine_id())
-            text.delete("1.0", tk.END)
-            text.insert(tk.END, generated)
+        def copy_machine() -> None:
+            self.clipboard_clear()
+            self.clipboard_append(machine)
+            self.update_idletasks()
+            messagebox.showinfo(APP_TITLE, "机器码已复制，请发送给授权供应方。")
+
+        def import_file() -> None:
+            selected = filedialog.askopenfilename(
+                parent=dialog,
+                title="选择授权文件",
+                filetypes=(("授权文件", "*.lic"), ("文本文件", "*.txt"), ("所有文件", "*.*")),
+            )
+            if selected:
+                text.delete("1.0", tk.END)
+                text.insert(tk.END, Path(selected).read_text(encoding="utf-8").strip())
 
         def register() -> None:
             candidate = text.get("1.0", tk.END).strip()
@@ -907,8 +939,9 @@ class BridgeGui(tk.Tk):
 
         buttons = ttk.Frame(frame)
         buttons.pack(fill=tk.X)
-        ttk.Button(buttons, text="生成本机授权码", command=generate).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="注册授权", command=register).pack(side=tk.LEFT, padx=8)
+        ttk.Button(buttons, text="复制机器码", command=copy_machine).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="导入授权文件", command=import_file).pack(side=tk.LEFT, padx=8)
+        ttk.Button(buttons, text="注册授权", command=register).pack(side=tk.LEFT)
         ttk.Button(buttons, text="关闭", command=dialog.destroy).pack(side=tk.RIGHT)
 
     def _show_about_dialog(self) -> None:
@@ -1038,8 +1071,24 @@ class BridgeGui(tk.Tk):
             if not channel.get("enabled", True) and name != "CH1":
                 continue
             item = bridges.get(name, {})
-            mode = "CAN FD" if canfd.get("canFdEnabled") else "Classical CAN"
-            data = _display_bitrate(canfd.get("dataBitrate", 2000000)) if canfd.get("canFdEnabled") else "-"
+            vector_fd = bool(
+                channel.get("vector", {}).get(
+                    "canFdEnabled",
+                    cfg.get("vector", {}).get("canFdEnabled", canfd.get("canFdEnabled", False)),
+                )
+            )
+            zlg_fd = bool(
+                channel.get("zlg", {}).get(
+                    "canFdEnabled",
+                    cfg.get("zlg", {}).get("canFdEnabled", canfd.get("canFdEnabled", False)),
+                )
+            )
+            if vector_fd == zlg_fd:
+                configured_mode = "CAN FD" if vector_fd else "Classical CAN"
+            else:
+                configured_mode = f"Vector {'CAN FD' if vector_fd else 'Classic'} / ZLG {'CAN FD' if zlg_fd else 'Classic'}"
+            mode = item.get("mode", configured_mode)
+            data = _display_bitrate(canfd.get("dataBitrate", 2000000)) if zlg_fd else "-"
             if status_override:
                 status = status_override
             elif not channel.get("enabled", True):
@@ -1223,7 +1272,8 @@ def _display_bitrate(value: Any) -> str:
 
 def _license_text(lic: Any) -> str:
     if lic.valid:
-        return f"授权正常（{lic.owner} / {lic.expires}）"
+        license_type = "便携授权" if getattr(lic, "license_type", "") == "portable" else "本机授权"
+        return f"授权正常（{lic.owner} / {license_type} / {lic.expires}）"
     if "expired" in str(lic.message).lower():
         return "已过期"
     return "未授权"

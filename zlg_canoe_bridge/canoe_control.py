@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import ctypes as ct
+from ctypes import wintypes
 
 
 DEFAULT_CANOE_PATHS = [
@@ -52,6 +53,52 @@ def close_canoe(timeout_s: float = 15.0) -> int:
 
 
 def _canoe_processes() -> list[dict[str, Any]]:
+    if hasattr(ct, "windll"):
+        return _canoe_processes_win32()
+    return _canoe_processes_powershell()
+
+
+def _canoe_processes_win32() -> list[dict[str, Any]]:
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = ct.c_void_p(-1).value
+
+    class PROCESSENTRY32W(ct.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ct.c_size_t),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ct.c_long),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ct.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ct.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ct.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == INVALID_HANDLE_VALUE:
+        return _canoe_processes_powershell()
+    entry = PROCESSENTRY32W()
+    entry.dwSize = ct.sizeof(PROCESSENTRY32W)
+    result = []
+    try:
+        ok = kernel32.Process32FirstW(snapshot, ct.byref(entry))
+        while ok:
+            name = entry.szExeFile
+            if name.lower() in ("canoe.exe", "canoe32.exe", "canoe64.exe"):
+                result.append({"pid": int(entry.th32ProcessID), "name": name, "cmd": ""})
+            ok = kernel32.Process32NextW(snapshot, ct.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return result
+
+
+def _canoe_processes_powershell() -> list[dict[str, Any]]:
     output = subprocess.run(
         [
             "powershell",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import ctypes as ct
+import logging
 import time
-from pathlib import Path
 from typing import Optional
 
 from zlg_canoe_bridge.adapters.base import CanAdapter
@@ -17,7 +17,7 @@ XL_ERR_QUEUE_IS_EMPTY = 10
 XL_BUS_TYPE_CAN = 0x00000001
 XL_INTERFACE_VERSION = 3
 XL_INTERFACE_VERSION_V4 = 4
-XL_ACTIVATE_RESET_CLOCK = 8
+XL_ACTIVATE_NONE = 0
 
 XL_TRANSMIT_MSG = 10
 XL_RECEIVE_MSG = 1
@@ -28,6 +28,7 @@ XL_CAN_MSG_FLAG_TX_COMPLETED = 0x0040
 
 XL_CANFD_TXMSG_FLAG_EDL = 0x0001
 XL_CANFD_TXMSG_FLAG_BRS = 0x0002
+XL_CANFD_TXMSG_FLAG_ESI = 0x0004
 XL_CANFD_TXMSG_FLAG_RTR = 0x0010
 XL_CANFD_TXMSG_FLAG_IDE = 0x0020
 
@@ -133,20 +134,34 @@ class XLcanRxEvent(ct.Structure):
 
 
 class VectorXLAdapter(CanAdapter):
+    rx_only = True
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.dll_path = cfg.get("dllPath") or "vxlapi64.dll"
-        self.app_name = cfg.get("applicationName", "ZLG_CANOE_BRIDGE").encode("ascii")
-        self.app_channel = int(cfg.get("applicationChannel", 0))
+        self.app_name = cfg.get("app_name", cfg.get("applicationName", "ZLG_CANOE_BRIDGE")).encode("ascii")
+        self.app_channel = int(cfg.get("channel", cfg.get("applicationChannel", 0)))
+        self.channel_owner = str(cfg.get("channel_owner", cfg.get("channelOwner", "canoe"))).lower()
+        if self.channel_owner not in ("canoe", "bridge"):
+            raise ValueError("vector.channel_owner must be 'canoe' or 'bridge'")
+        self.shared_virtual_channel = bool(cfg.get("shared_virtual_channel", cfg.get("sharedVirtualChannel", True)))
+        if self.channel_owner == "canoe" and not self.shared_virtual_channel:
+            raise ValueError("vector.shared_virtual_channel must be true when channel_owner is 'canoe'")
         self.arb_bitrate = int(cfg.get("arbitrationBitrate", 500000))
         self.data_bitrate = int(cfg.get("dataBitrate", 2000000))
         self.can_fd_enabled = bool(cfg.get("canFdEnabled", True))
         self.force_fd = bool(cfg.get("forceFd", False))
-        self.receive_tx_ok = bool(cfg.get("receiveTxOk", False))
+        # A bridge must never turn its own transmit confirmations into bus RX.
+        # Keep the legacy option readable for config compatibility, but do not
+        # allow it to weaken the direction boundary.
+        self.receive_tx_ok = False
         self.port_handle = ct.c_long(-1)
         self.access_mask = ct.c_ulonglong(0)
         self.permission_mask = ct.c_ulonglong(0)
         self.dll = None
+        self.log = logging.getLogger("zlg_canoe_bridge")
+        self.requested_permission_mask = 0
+        self.granted_permission_mask = 0
 
     def _check(self, status: int, api: str) -> None:
         if status != XL_SUCCESS:
@@ -154,62 +169,95 @@ class VectorXLAdapter(CanAdapter):
 
     def open(self) -> None:
         self.dll = ct.WinDLL(self.dll_path)
-        self._declare_api()
+        driver_open = False
+        port_open = False
+        try:
+            self._declare_api()
+            self._check(self.dll.xlOpenDriver(), "xlOpenDriver")
+            driver_open = True
 
-        self._check(self.dll.xlOpenDriver(), "xlOpenDriver")
+            hw_type = ct.c_uint(0)
+            hw_index = ct.c_uint(0)
+            hw_channel = ct.c_uint(0)
+            status = self.dll.xlGetApplConfig(
+                ct.c_char_p(self.app_name), ct.c_uint(self.app_channel),
+                ct.byref(hw_type), ct.byref(hw_index), ct.byref(hw_channel),
+                ct.c_uint(XL_BUS_TYPE_CAN),
+            )
+            self._check(status, f"xlGetApplConfig. 请在 Vector Hardware Config 中配置应用 {self.app_name.decode()}")
 
-        hw_type = ct.c_uint(0)
-        hw_index = ct.c_uint(0)
-        hw_channel = ct.c_uint(0)
-        status = self.dll.xlGetApplConfig(
-            ct.c_char_p(self.app_name),
-            ct.c_uint(self.app_channel),
-            ct.byref(hw_type),
-            ct.byref(hw_index),
-            ct.byref(hw_channel),
-            ct.c_uint(XL_BUS_TYPE_CAN),
+            ch_index = self.dll.xlGetChannelIndex(hw_type.value, hw_index.value, hw_channel.value)
+            if ch_index < 0:
+                raise RuntimeError("xlGetChannelIndex failed. 检查 Virtual CAN 通道分配")
+
+            self.access_mask = ct.c_ulonglong(1 << ch_index)
+            # A non-zero input requests init access. Shared/CANoe-owner mode must
+            # always pass a real pointer whose input value is exactly zero.
+            requested = 0 if self.channel_owner == "canoe" else self.access_mask.value
+            self.requested_permission_mask = requested
+            self.permission_mask = ct.c_ulonglong(requested)
+
+            status = self.dll.xlOpenPort(
+                ct.byref(self.port_handle), ct.c_char_p(self.app_name), self.access_mask,
+                ct.byref(self.permission_mask), ct.c_uint(8192),
+                ct.c_uint(XL_INTERFACE_VERSION_V4 if self.can_fd_enabled else XL_INTERFACE_VERSION),
+                ct.c_uint(XL_BUS_TYPE_CAN),
+            )
+            self._check(status, "xlOpenPort")
+            port_open = True
+            self.granted_permission_mask = int(self.permission_mask.value)
+
+            self.log.info(
+                "[Vector] Application: %s | Channel owner: %s | Mode: %s | "
+                "Init access requested: %s | Requested permission mask: 0x%X | "
+                "Granted permission mask: 0x%X | CAN FD supported: %s",
+                self.app_name.decode(), "CANoe" if self.channel_owner == "canoe" else "Bridge",
+                "Shared RX/TX" if self.channel_owner == "canoe" else "Bridge initialized",
+                "No" if requested == 0 else "Yes", requested, self.granted_permission_mask,
+                "Yes" if self.can_fd_enabled else "No",
+            )
+
+            if self.channel_owner == "bridge":
+                if (self.granted_permission_mask & self.access_mask.value) != self.access_mask.value:
+                    raise RuntimeError(
+                        "Vector init access was requested but not granted; refusing to configure the channel. "
+                        f"requested=0x{requested:X}, granted=0x{self.granted_permission_mask:X}"
+                    )
+                self._configure_owned_channel()
+
+            status = self.dll.xlActivateChannel(
+                self.port_handle, self.access_mask, ct.c_uint(XL_BUS_TYPE_CAN), ct.c_uint(XL_ACTIVATE_NONE)
+            )
+            self._check(status, "xlActivateChannel")
+        except Exception:
+            if port_open:
+                self.dll.xlClosePort(self.port_handle)
+            if driver_open:
+                self.dll.xlCloseDriver()
+            self.dll = None
+            self.port_handle = ct.c_long(-1)
+            raise
+
+    def _configure_owned_channel(self) -> None:
+        if not self.can_fd_enabled:
+            self._check(
+                self.dll.xlCanSetChannelBitrate(self.port_handle, self.access_mask, ct.c_ulong(self.arb_bitrate)),
+                "xlCanSetChannelBitrate",
+            )
+            return
+        fd_conf = XLcanFdConf()
+        fd_conf.arbitrationBitRate = self.arb_bitrate
+        fd_conf.dataBitRate = self.data_bitrate
+        fd_conf.sjwAbr = int(self.cfg.get("sjwAbr", 2))
+        fd_conf.tseg1Abr = int(self.cfg.get("tseg1Abr", 63))
+        fd_conf.tseg2Abr = int(self.cfg.get("tseg2Abr", 16))
+        fd_conf.sjwDbr = int(self.cfg.get("sjwDbr", 2))
+        fd_conf.tseg1Dbr = int(self.cfg.get("tseg1Dbr", 15))
+        fd_conf.tseg2Dbr = int(self.cfg.get("tseg2Dbr", 4))
+        self._check(
+            self.dll.xlCanFdSetConfiguration(self.port_handle, self.access_mask, ct.byref(fd_conf)),
+            "xlCanFdSetConfiguration",
         )
-        self._check(status, "xlGetApplConfig. 请先在 Vector Hardware Config 中配置应用 ZLG_CANOE_BRIDGE")
-
-        ch_index = self.dll.xlGetChannelIndex(hw_type.value, hw_index.value, hw_channel.value)
-        if ch_index < 0:
-            raise RuntimeError("xlGetChannelIndex failed. 检查 Virtual CAN 通道分配")
-
-        self.access_mask = ct.c_ulonglong(1 << ch_index)
-        self.permission_mask = ct.c_ulonglong(self.access_mask.value)
-
-        status = self.dll.xlOpenPort(
-            ct.byref(self.port_handle),
-            ct.c_char_p(self.app_name),
-            self.access_mask,
-            ct.byref(self.permission_mask),
-            ct.c_uint(8192),
-            ct.c_uint(XL_INTERFACE_VERSION_V4 if self.can_fd_enabled else XL_INTERFACE_VERSION),
-            ct.c_uint(XL_BUS_TYPE_CAN),
-        )
-        self._check(status, "xlOpenPort")
-
-        if self.can_fd_enabled:
-            fd_conf = XLcanFdConf()
-            fd_conf.arbitrationBitRate = self.arb_bitrate
-            fd_conf.dataBitRate = self.data_bitrate
-            # Reasonable defaults. For strict timing, set these according to your project.
-            fd_conf.sjwAbr = int(self.cfg.get("sjwAbr", 2))
-            fd_conf.tseg1Abr = int(self.cfg.get("tseg1Abr", 63))
-            fd_conf.tseg2Abr = int(self.cfg.get("tseg2Abr", 16))
-            fd_conf.sjwDbr = int(self.cfg.get("sjwDbr", 2))
-            fd_conf.tseg1Dbr = int(self.cfg.get("tseg1Dbr", 15))
-            fd_conf.tseg2Dbr = int(self.cfg.get("tseg2Dbr", 4))
-            status = self.dll.xlCanFdSetConfiguration(self.port_handle, self.access_mask, ct.byref(fd_conf))
-            self._check(status, "xlCanFdSetConfiguration")
-
-        status = self.dll.xlActivateChannel(
-            self.port_handle,
-            self.access_mask,
-            ct.c_uint(XL_BUS_TYPE_CAN),
-            ct.c_uint(XL_ACTIVATE_RESET_CLOCK),
-        )
-        self._check(status, "xlActivateChannel")
 
     def close(self) -> None:
         if self.dll is None:
@@ -226,6 +274,8 @@ class VectorXLAdapter(CanAdapter):
     def send(self, frame: CanFdFrame) -> None:
         assert self.dll is not None
         if not self.can_fd_enabled:
+            if frame.is_fd:
+                raise ValueError("Classic CAN Vector channel cannot transmit a CAN FD frame")
             self._send_classic(frame)
             return
         if not self.can_fd_enabled and len(frame.data) > 8:
@@ -238,6 +288,8 @@ class VectorXLAdapter(CanAdapter):
             flags |= XL_CANFD_TXMSG_FLAG_EDL
         if self.can_fd_enabled and frame.brs:
             flags |= XL_CANFD_TXMSG_FLAG_BRS
+        if self.can_fd_enabled and frame.esi:
+            flags |= XL_CANFD_TXMSG_FLAG_ESI
         if frame.is_extended:
             flags |= XL_CANFD_TXMSG_FLAG_IDE
         if frame.is_remote:
@@ -265,13 +317,14 @@ class VectorXLAdapter(CanAdapter):
             if status == XL_SUCCESS:
                 if ev.tag not in (XL_CAN_EV_TAG_RX_OK, XL_CAN_EV_TAG_TX_OK):
                     continue
-                if ev.tag == XL_CAN_EV_TAG_TX_OK and not self.receive_tx_ok:
+                if ev.tag == XL_CAN_EV_TAG_TX_OK:
                     continue
                 msg = ev.tagData
                 flags = int(msg.msgFlags)
                 dlc = int(msg.dlc)
                 length = dlc_to_len(dlc)
-                data = bytes(msg.data[:length])
+                is_remote = bool(flags & XL_CAN_RXMSG_FLAG_RTR)
+                data = b"" if is_remote else bytes(msg.data[:length])
                 return CanFdFrame(
                     can_id=int(msg.canId & 0x1FFFFFFF),
                     data=data,
@@ -279,8 +332,10 @@ class VectorXLAdapter(CanAdapter):
                     is_extended=bool(flags & XL_CAN_RXMSG_FLAG_IDE),
                     brs=bool(flags & XL_CAN_RXMSG_FLAG_BRS),
                     esi=bool(flags & XL_CAN_RXMSG_FLAG_ESI),
-                    is_remote=bool(flags & XL_CAN_RXMSG_FLAG_RTR),
+                    is_remote=is_remote,
                     timestamp_us=int(ev.timeStamp // 1000),
+                    channel=int(ev.channelIndex),
+                    dlc_value=dlc,
                 )
             if status != XL_ERR_QUEUE_IS_EMPTY:
                 self._check(status, "xlCanReceive")
@@ -297,7 +352,7 @@ class VectorXLAdapter(CanAdapter):
         if frame.is_extended:
             can_id |= XL_CAN_EXT_MSG_ID
         ev.tagData.msg.id = can_id
-        ev.tagData.msg.dlc = len(frame.data)
+        ev.tagData.msg.dlc = frame.dlc
         flags = 0
         if frame.is_remote:
             flags |= XL_CAN_MSG_FLAG_REMOTE_FRAME
@@ -322,20 +377,23 @@ class VectorXLAdapter(CanAdapter):
                     continue
                 msg = ev.tagData.msg
                 flags = int(msg.flags)
-                if flags & XL_CAN_MSG_FLAG_TX_COMPLETED and not self.receive_tx_ok:
+                if flags & XL_CAN_MSG_FLAG_TX_COMPLETED:
                     continue
                 dlc = int(msg.dlc)
                 length = min(dlc, 8)
                 raw_id = int(msg.id)
+                is_remote = bool(flags & XL_CAN_MSG_FLAG_REMOTE_FRAME)
                 return CanFdFrame(
                     can_id=raw_id & 0x1FFFFFFF,
-                    data=bytes(msg.data[:length]),
+                    data=b"" if is_remote else bytes(msg.data[:length]),
                     is_fd=False,
                     is_extended=bool(raw_id & XL_CAN_EXT_MSG_ID),
                     brs=False,
                     esi=False,
-                    is_remote=bool(flags & XL_CAN_MSG_FLAG_REMOTE_FRAME),
+                    is_remote=is_remote,
                     timestamp_us=int(ev.timeStamp // 1000),
+                    channel=int(ev.chanIndex),
+                    dlc_value=dlc,
                 )
             if status != XL_ERR_QUEUE_IS_EMPTY:
                 self._check(status, "xlReceive")
@@ -361,6 +419,8 @@ class VectorXLAdapter(CanAdapter):
         d.xlDeactivateChannel.restype = ct.c_short
         d.xlCanFdSetConfiguration.argtypes = [ct.c_long, ct.c_ulonglong, ct.POINTER(XLcanFdConf)]
         d.xlCanFdSetConfiguration.restype = ct.c_short
+        d.xlCanSetChannelBitrate.argtypes = [ct.c_long, ct.c_ulonglong, ct.c_ulong]
+        d.xlCanSetChannelBitrate.restype = ct.c_short
         d.xlCanTransmitEx.argtypes = [ct.c_long, ct.c_ulonglong, ct.c_uint, ct.POINTER(ct.c_uint), ct.POINTER(XLcanTxEvent)]
         d.xlCanTransmitEx.restype = ct.c_short
         d.xlCanReceive.argtypes = [ct.c_long, ct.POINTER(XLcanRxEvent)]

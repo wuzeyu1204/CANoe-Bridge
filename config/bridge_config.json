@@ -3,12 +3,16 @@
   "logLevel": "INFO",
   "logDir": "logs",
   "echoSuppression": true,
-  "echoWindowMs": 50,
+  "echoWindowMs": 5,
+  "queueSize": 1024,
+  "reconnectInitialMs": 250,
+  "reconnectMaxMs": 5000,
+  "autoReconnect": true,
   "autoDetectZlgOnStart": false,
   "canfd": {
     "arbitrationBitrate": 500000,
-    "dataBitrate": 2000000,
-    "canFdEnabled": false,
+    "dataBitrate": 5000000,
+    "canFdEnabled": true,
     "brs": true,
     "isoCanFd": true,
     "forceFd": false,
@@ -21,14 +25,19 @@
   },
   "vector": {
     "dllPath": "vxlapi64.dll",
+    "app_name": "ZLG_CANOE_BRIDGE",
+    "channel": 0,
+    "channel_owner": "canoe",
+    "shared_virtual_channel": true,
     "applicationName": "ZLG_CANOE_BRIDGE",
+    "canFdEnabled": false,
     "receiveTxOk": false
   },
   "zlg": {
     "dllPath": "C:/Program Files (x86)/00_SoftWare/ZXDoc/zlgcan.dll",
     "deviceType": 43,
     "deviceIndex": 0,
-    "enableTermination": false,
+    "enableTermination": true,
     "useSetValue": true,
     "openRetries": 2,
     "openRetryDelayS": 0.8,
@@ -45,6 +54,7 @@
       "name": "CH0",
       "enabled": true,
       "vector": {
+        "channel": 0,
         "applicationChannel": 0
       },
       "zlg": {
@@ -55,6 +65,7 @@
       "name": "CH1",
       "enabled": false,
       "vector": {
+        "channel": 1,
         "applicationChannel": 1
       },
       "zlg": {

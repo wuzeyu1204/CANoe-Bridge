@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import ByteString
+from typing import Optional
 import time
 
 DLC_TO_LEN = {
@@ -46,6 +46,8 @@ class CanFdFrame:
     is_remote: bool = False
     timestamp_us: int = 0
     direction: str = ""  # e.g. vector_rx, zlg_rx, vector_tx, zlg_tx
+    channel: int = 0
+    dlc_value: Optional[int] = None
 
     def __post_init__(self) -> None:
         if isinstance(self.data, bytearray):
@@ -54,12 +56,21 @@ class CanFdFrame:
             raise ValueError("CANFD payload cannot exceed 64 bytes")
         if not self.is_fd and len(self.data) > 8:
             raise ValueError("classic CAN payload cannot exceed 8 bytes")
+        max_id = 0x1FFFFFFF if self.is_extended else 0x7FF
+        if self.can_id < 0 or self.can_id > max_id:
+            raise ValueError(f"CAN ID 0x{self.can_id:X} is invalid for this frame format")
+        if self.dlc_value is not None:
+            wire_length = dlc_to_len(self.dlc_value) if self.is_fd else self.dlc_value
+            if self.dlc_value < 0 or self.dlc_value > (15 if self.is_fd else 8):
+                raise ValueError(f"invalid DLC: {self.dlc_value}")
+            if not self.is_remote and wire_length < len(self.data):
+                raise ValueError("DLC cannot represent the supplied payload")
         if self.timestamp_us == 0:
             self.timestamp_us = time.monotonic_ns() // 1000
 
     @property
     def dlc(self) -> int:
-        return len_to_dlc(len(self.data))
+        return self.dlc_value if self.dlc_value is not None else len_to_dlc(len(self.data))
 
     @property
     def ide_str(self) -> str:
@@ -74,6 +85,7 @@ class CanFdFrame:
             self.brs,
             self.esi,
             self.is_remote,
+            self.dlc,
             bytes(self.data),
         )
 

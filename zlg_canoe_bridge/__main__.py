@@ -48,6 +48,20 @@ def channel_configs(cfg: dict) -> list[dict]:
         if not channel.get("enabled", True):
             continue
         merged = _deep_merge(global_defaults, channel)
+        # A per-channel legacy alias must override a global new-style value.
+        # Without this normalization, global vector.channel=0 would silently
+        # win over channels[n].vector.applicationChannel=1.
+        vector_override = channel.get("vector", {})
+        merged_vector = merged.setdefault("vector", {})
+        alias_pairs = (
+            ("applicationChannel", "channel"),
+            ("applicationName", "app_name"),
+            ("channelOwner", "channel_owner"),
+            ("sharedVirtualChannel", "shared_virtual_channel"),
+        )
+        for legacy, current in alias_pairs:
+            if current not in vector_override and legacy in vector_override:
+                merged_vector[current] = vector_override[legacy]
         merged.setdefault("name", f"CH{index}")
         result.append(merged)
     if not result:
@@ -95,8 +109,11 @@ def main() -> int:
             zlg,
             log,
             echo_suppression=bool(channel.get("echoSuppression", cfg.get("echoSuppression", True))),
-            echo_window_ms=int(channel.get("echoWindowMs", cfg.get("echoWindowMs", 50))),
+            echo_window_ms=int(channel.get("echoWindowMs", cfg.get("echoWindowMs", 5))),
             name=str(channel.get("name", "CH0")),
+            queue_size=int(channel.get("queueSize", cfg.get("queueSize", 1024))),
+            reconnect_initial_s=float(cfg.get("reconnectInitialMs", 250)) / 1000.0,
+            reconnect_max_s=float(cfg.get("reconnectMaxMs", 5000)) / 1000.0,
         )
         bridges.append(bridge)
         if cfg.get("mode", "native").lower() == "mock":

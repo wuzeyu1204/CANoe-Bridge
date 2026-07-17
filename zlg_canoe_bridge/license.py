@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import base64
-import getpass
 import hashlib
-import hmac
 import json
 import os
 import platform
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
-from typing import Any
+
+from zlg_canoe_bridge.license_public_key import RSA_PUBLIC_E, RSA_PUBLIC_N
 
 
 PRODUCT_ID = "ZLG_CANOE_BRIDGE"
-LICENSE_SECRET = b"WDJR-ZLG-CANOE-BRIDGE-LOCAL-LICENSE-v1"
+LICENSE_VERSION = 2
+LICENSE_PREFIX = "ZCB2"
+PORTABLE_MACHINE = "*"
+SHA256_DIGEST_INFO_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,7 @@ class LicenseInfo:
     owner: str = ""
     machine_id: str = ""
     expires: str = ""
+    license_type: str = ""
     message: str = "Unregistered"
 
 
@@ -37,29 +40,14 @@ def license_path() -> Path:
 
 
 def machine_id() -> str:
-    raw = "|".join(
-        [
-            PRODUCT_ID,
-            platform.node(),
-            getpass.getuser(),
-            str(uuid.getnode()),
-            os.environ.get("PROCESSOR_IDENTIFIER", ""),
-        ]
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32].upper()
-
-
-def generate_license(owner: str, expires: str = "2099-12-31", machine: str | None = None) -> str:
-    payload = {
-        "product": PRODUCT_ID,
-        "owner": owner.strip(),
-        "machine": machine or machine_id(),
-        "expires": expires.strip(),
-        "issued": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-    }
-    payload_b64 = _b64(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    signature = _sign(payload_b64)
-    return f"{payload_b64}.{signature}"
+    """Stable Windows installation ID; independent of login user and hostname."""
+    components = [PRODUCT_ID]
+    machine_guid = _windows_machine_guid()
+    if machine_guid:
+        components.append(machine_guid)
+    else:
+        components.extend([str(uuid.getnode()), platform.machine(), platform.processor()])
+    return hashlib.sha256("|".join(components).encode("utf-8")).hexdigest()[:32].upper()
 
 
 def register_license(key: str) -> LicenseInfo:
@@ -84,11 +72,15 @@ def current_license() -> LicenseInfo:
 
 def validate_license_key(key: str) -> LicenseInfo:
     key = key.strip()
-    if "." not in key:
-        return LicenseInfo(False, machine_id=machine_id(), message="Invalid license format")
-    payload_b64, signature = key.split(".", 1)
-    expected = _sign(payload_b64)
-    if not hmac.compare_digest(signature, expected):
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != LICENSE_PREFIX:
+        return LicenseInfo(False, machine_id=machine_id(), message="Invalid or obsolete license format")
+    payload_b64, signature_b64 = parts[1], parts[2]
+    try:
+        signature = _unb64(signature_b64)
+    except Exception:
+        return LicenseInfo(False, machine_id=machine_id(), message="Invalid license signature encoding")
+    if not _verify_rsa_signature(payload_b64.encode("ascii"), signature):
         return LicenseInfo(False, machine_id=machine_id(), message="Invalid license signature")
     try:
         payload = json.loads(_unb64(payload_b64).decode("utf-8"))
@@ -98,22 +90,52 @@ def validate_license_key(key: str) -> LicenseInfo:
     owner = str(payload.get("owner", ""))
     machine = str(payload.get("machine", ""))
     expires = str(payload.get("expires", ""))
-    if payload.get("product") != PRODUCT_ID:
-        return LicenseInfo(False, owner, machine, expires, "License product mismatch")
-    if machine != machine_id():
-        return LicenseInfo(False, owner, machine, expires, "License is not for this machine")
+    license_type = str(payload.get("license_type", ""))
+    info_args = (owner, machine, expires, license_type)
+    if payload.get("version") != LICENSE_VERSION or payload.get("product") != PRODUCT_ID:
+        return LicenseInfo(False, *info_args, message="License product or version mismatch")
+    if not owner:
+        return LicenseInfo(False, *info_args, message="License owner is empty")
+    if license_type not in ("node_locked", "portable"):
+        return LicenseInfo(False, *info_args, message="License type is invalid")
+    if license_type == "portable":
+        if machine != PORTABLE_MACHINE:
+            return LicenseInfo(False, *info_args, message="Portable license payload is invalid")
+    elif machine.upper() != machine_id():
+        return LicenseInfo(False, *info_args, message="License is not for this machine")
     try:
         expire_date = date.fromisoformat(expires)
     except ValueError:
-        return LicenseInfo(False, owner, machine, expires, "License expiry date is invalid")
+        return LicenseInfo(False, *info_args, message="License expiry date is invalid")
     if expire_date < date.today():
-        return LicenseInfo(False, owner, machine, expires, "License expired")
-    return LicenseInfo(True, owner, machine, expires, "Registered")
+        return LicenseInfo(False, *info_args, message="License expired")
+    return LicenseInfo(True, *info_args, message="Registered")
 
 
-def _sign(payload_b64: str) -> str:
-    digest = hmac.new(LICENSE_SECRET, payload_b64.encode("ascii"), hashlib.sha256).digest()
-    return _b64(digest)
+def _verify_rsa_signature(message: bytes, signature: bytes) -> bool:
+    key_bytes = (RSA_PUBLIC_N.bit_length() + 7) // 8
+    if len(signature) != key_bytes:
+        return False
+    recovered = pow(int.from_bytes(signature, "big"), RSA_PUBLIC_E, RSA_PUBLIC_N).to_bytes(key_bytes, "big")
+    digest_info = SHA256_DIGEST_INFO_PREFIX + hashlib.sha256(message).digest()
+    padding_length = key_bytes - len(digest_info) - 3
+    if padding_length < 8:
+        return False
+    expected = b"\x00\x01" + b"\xff" * padding_length + b"\x00" + digest_info
+    return recovered == expected
+
+
+def _windows_machine_guid() -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+        access = winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0, access) as key:
+            value, _ = winreg.QueryValueEx(key, "MachineGuid")
+        return str(value).strip().upper()
+    except OSError:
+        return ""
 
 
 def _b64(data: bytes) -> str:
@@ -121,5 +143,4 @@ def _b64(data: bytes) -> str:
 
 
 def _unb64(text: str) -> bytes:
-    padding = "=" * (-len(text) % 4)
-    return base64.urlsafe_b64decode(text + padding)
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))

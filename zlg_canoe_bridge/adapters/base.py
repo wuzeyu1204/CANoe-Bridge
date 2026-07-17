@@ -5,6 +5,11 @@ from zlg_canoe_bridge.frame import CanFdFrame
 
 
 class CanAdapter(ABC):
+    # True when receive() exposes bus RX frames only and filters/does not emit
+    # this application's transmit confirmations. BridgeCore uses this to avoid
+    # content-based echo suppression when the driver provides reliable direction.
+    rx_only: bool = False
+
     @abstractmethod
     def open(self) -> None:
         pass

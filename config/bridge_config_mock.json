@@ -3,7 +3,14 @@
   "logLevel": "DEBUG",
   "logDir": "logs",
   "echoSuppression": true,
-  "echoWindowMs": 50,
+  "echoWindowMs": 5,
+  "queueSize": 32,
+  "vector": {
+    "app_name": "ZLG_CANOE_BRIDGE",
+    "channel": 0,
+    "channel_owner": "canoe",
+    "shared_virtual_channel": true
+  },
   "canfd": {
     "arbitrationBitrate": 500000,
     "dataBitrate": 2000000,

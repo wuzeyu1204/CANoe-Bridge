@@ -154,8 +154,10 @@ Hardware Channel: Virtual CAN 1
 
 ```json
 "vector": {
-  "applicationName": "ZLG_CANOE_BRIDGE",
-  "applicationChannel": 0
+  "app_name": "ZLG_CANOE_BRIDGE",
+  "channel": 0,
+  "channel_owner": "canoe",
+  "shared_virtual_channel": true
 }
 ```
 
@@ -242,13 +244,17 @@ CANoe Trace 里能看到 ECU 响应，说明链路打通。
 ```json
 "vector": {
   "dllPath": "vxlapi64.dll",
-  "applicationName": "ZLG_CANOE_BRIDGE",
-  "applicationChannel": 0,
+  "app_name": "ZLG_CANOE_BRIDGE",
+  "channel": 0,
+  "channel_owner": "canoe",
+  "shared_virtual_channel": true,
   "receiveTxOk": false
 }
 ```
 
-`receiveTxOk=false` 表示不接收 Vector 侧 TX Confirmation，减少回环风险。
+`channel_owner=canoe` 是默认共享模式：桥接只打开/激活/收发，不申请 init access，也不配置 Vector 波特率或 CAN FD 时序。CANoe 无论先后启动都保有初始化权限。仅在脱离 CANoe 独立运行、且确定由桥接初始化通道时，才改为 `bridge`；此时未获得完整 init access 会立即失败。
+
+`receiveTxOk=false` 表示不转发 Vector TX confirmation。运行时使用有界队列；驱动方向信息可靠时不做按内容去重，避免误丢合法周期帧。
 
 ### ZLG 配置
 
